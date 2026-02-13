@@ -1,0 +1,187 @@
+name: Sync Upstream Branches
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'  # Run every 4 hours
+  workflow_dispatch:  # Allow manual trigger
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - upstream_repo: 'https://github.com/jancis/sync-test1'
+            upstream_branch: 'branch1'
+            mirror_branch: 'sync/jancis/branch1'
+            target_branch: 'jancis/branch1'
+          - upstream_repo: 'https://github.com/jancis/sync-test1'
+            upstream_branch: 'branch2'
+            mirror_branch: 'sync/jancis/branch2'
+            target_branch: 'jancis/branch2'
+      fail-fast: false  # Continue with other branches even if one fails
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream ${{ matrix.upstream_repo }} || git remote set-url upstream ${{ matrix.upstream_repo }}
+          git fetch upstream ${{ matrix.upstream_branch }}
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          # Create or update mirror branch
+          if git show-ref --verify --quiet refs/heads/${{ matrix.mirror_branch }}; then
+            git checkout ${{ matrix.mirror_branch }}
+            BEFORE_SYNC=$(git rev-parse HEAD)
+          else
+            git checkout -b ${{ matrix.mirror_branch }}
+            BEFORE_SYNC=""
+          fi
+          
+          # Sync with upstream
+          git reset --hard upstream/${{ matrix.upstream_branch }}
+          AFTER_SYNC=$(git rev-parse HEAD)
+          
+          # Check if there are changes
+          if [ "$BEFORE_SYNC" != "$AFTER_SYNC" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "before_sync=$BEFORE_SYNC" >> $GITHUB_OUTPUT
+            echo "after_sync=$AFTER_SYNC" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Replace .github folder
+        if: steps.check_changes.outputs.has_changes == 'true'
+        run: |
+          # Remove existing .github folder
+          rm -rf .github
+          
+          # Fetch .github folder from main branch
+          git fetch origin main
+          git checkout origin/main -- .github
+          
+          # Commit the change
+          git add .github
+          git commit -m "Replace .github folder with version from main branch" || true
+
+      - name: Push mirror branch
+        if: steps.check_changes.outputs.has_changes == 'true'
+        run: |
+          git push origin ${{ matrix.mirror_branch }} --force
+
+      - name: Generate changelog
+        if: steps.check_changes.outputs.has_changes == 'true'
+        id: changelog
+        run: |
+          BEFORE="${{ steps.check_changes.outputs.before_sync }}"
+          AFTER="${{ steps.check_changes.outputs.after_sync }}"
+          
+          if [ -z "$BEFORE" ]; then
+            # First sync - just show the latest commit
+            CHANGELOG="Initial sync from upstream branch ${{ matrix.upstream_branch }}"
+            CHANGELOG="${CHANGELOG}\n\nLatest commit:\n"
+            CHANGELOG="${CHANGELOG}$(git log -1 --pretty=format:'- %h %s (%an, %ar)' $AFTER)"
+          else
+            # Generate changelog between commits
+            CHANGELOG="Changes synced from upstream branch ${{ matrix.upstream_branch }}:\n\n"
+            CHANGELOG="${CHANGELOG}$(git log --pretty=format:'- %h %s (%an, %ar)' $BEFORE..$AFTER)"
+          fi
+          
+          # Save to file for PR body
+          echo -e "$CHANGELOG" > /tmp/changelog.txt
+          
+          # Also output for debugging
+          echo "Changelog generated:"
+          cat /tmp/changelog.txt
+
+      - name: Create Pull Request
+        if: steps.check_changes.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          # Fetch all remote branches
+          git fetch origin
+
+          # Ensure mirror branch is available locally
+          git fetch origin ${{ matrix.mirror_branch }}
+          MIRROR_SHA=$(git rev-parse origin/${{ matrix.mirror_branch }})
+
+          # Check if target branch exists remotely
+          if git ls-remote --heads origin ${{ matrix.target_branch }} | grep -q ${{ matrix.target_branch }}; then
+            echo "Target branch exists remotely"
+            git checkout ${{ matrix.target_branch }}
+            git pull origin ${{ matrix.target_branch }}
+            TARGET_SHA=$(git rev-parse ${{ matrix.target_branch }})
+
+            # Check if branches have diverged (neither is ancestor of the other)
+            if ! git merge-base --is-ancestor origin/${{ matrix.mirror_branch }} ${{ matrix.target_branch }} && \
+               ! git merge-base --is-ancestor ${{ matrix.target_branch }} origin/${{ matrix.mirror_branch }}; then
+              echo "WARNING: Branches have diverged (neither is ancestor of the other)"
+              echo "Resetting target branch to mirror branch to establish linear history"
+              git reset --hard origin/${{ matrix.mirror_branch }}
+              git push origin ${{ matrix.target_branch }} --force
+              echo "Target branch reset complete, skipping PR creation (no changes to merge)"
+              exit 0
+            fi
+          else
+            echo "Target branch doesn't exist, creating from mirror branch"
+            git checkout -b ${{ matrix.target_branch }} origin/${{ matrix.mirror_branch }}
+            git push origin ${{ matrix.target_branch }}
+            echo "Target branch created from mirror branch, skipping PR creation (branches are identical)"
+            exit 0
+          fi
+
+          # Check if branches are identical
+          TARGET_SHA=$(git rev-parse ${{ matrix.target_branch }})
+          echo "Target branch SHA: $TARGET_SHA"
+          echo "Mirror branch SHA: $MIRROR_SHA"
+
+          if [ "$TARGET_SHA" = "$MIRROR_SHA" ]; then
+            echo "Branches are identical (same commit SHA), skipping PR creation"
+            exit 0
+          fi
+
+          # Check if target is ahead of mirror (nothing to merge)
+          if git merge-base --is-ancestor origin/${{ matrix.mirror_branch }} ${{ matrix.target_branch }}; then
+            MERGE_BASE=$(git merge-base origin/${{ matrix.mirror_branch }} ${{ matrix.target_branch }})
+            if [ "$MERGE_BASE" = "$MIRROR_SHA" ]; then
+              echo "Target branch is ahead of mirror branch, nothing to sync"
+              exit 0
+            fi
+          fi
+
+          # Check if PR already exists
+          EXISTING_PR=$(gh pr list --head ${{ matrix.mirror_branch }} --base ${{ matrix.target_branch }} --json number --jq '.[0].number')
+
+          if [ -z "$EXISTING_PR" ]; then
+            # Create new PR
+            echo "Creating new PR from ${{ matrix.mirror_branch }} to ${{ matrix.target_branch }}"
+            gh pr create \
+              --title "Sync upstream changes from ${{ matrix.upstream_branch }}" \
+              --body "$(cat /tmp/changelog.txt)" \
+              --head ${{ matrix.mirror_branch }} \
+              --base ${{ matrix.target_branch }}
+          else
+            # Update existing PR
+            echo "Updating existing PR #$EXISTING_PR"
+            gh pr edit $EXISTING_PR \
+              --body "$(cat /tmp/changelog.txt)"
+          fi
+
