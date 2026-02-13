@@ -1,0 +1,26 @@
+name: On PR Created
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  on-pr-created:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run on PR creation
+        run: |
+          echo "pr creation"
+          echo "PR #${{ github.event.pull_request.number }} was created"
+          echo "Title: ${{ github.event.pull_request.title }}"
+          echo "Base branch: ${{ github.event.pull_request.base.ref }}"
+          echo "Head branch: ${{ github.event.pull_request.head.ref }}"
+

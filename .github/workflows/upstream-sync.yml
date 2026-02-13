@@ -1,0 +1,98 @@
+name: Pull upstream changes
+on:
+  schedule:
+    - cron:  '0 10 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        upstream:
+          - name: test1
+            repo: https://github.com/jancis/sync-test1.git
+            branch: branch1
+            local_branch: jancis/branch1
+          - name: test2
+            repo: https://github.com/jancis/sync-test1.git
+            branch: branch2
+            local_branch: jancis/branch2
+
+    steps:
+      - name: Checkout control repo
+        uses: actions/checkout@v6
+
+      - name: Configure git
+        run: |
+          git config user.name "upstream-bot"
+          git config user.email "upstream-bot@users.noreply.github.com"
+
+      - name: Add remote for ${{ matrix.upstream.name }}
+        run: |
+          git remote add ${{ matrix.upstream.name }} ${{ matrix.upstream.repo }}
+          git fetch ${{ matrix.upstream.name }}
+
+      - name: Sync ${{ matrix.upstream.local_branch }}
+        id: sync
+        run: |
+          git checkout -B ${{ matrix.upstream.local_branch }} ${{ matrix.upstream.name }}/${{ matrix.upstream.branch }}
+
+          # Check if there are changes compared to origin
+          git fetch origin ${{ matrix.upstream.local_branch }} || true
+          
+          # Check if remote branch exists and compare
+          if git rev-parse --verify origin/${{ matrix.upstream.local_branch }} >/dev/null 2>&1; then
+            if git diff --quiet origin/${{ matrix.upstream.local_branch }} HEAD; then
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+              echo "No changes detected, skipping PR"
+            else
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+              echo "Changes detected, will create PR"
+              
+              # Capture changelog
+              echo "changelog<<EOF" >> $GITHUB_OUTPUT
+              git log --oneline origin/${{ matrix.upstream.local_branch }}..HEAD >> $GITHUB_OUTPUT
+              echo "EOF" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "Remote branch does not exist, treating as new changes"
+            
+            # For new branches, show last 10 commits
+            echo "changelog<<EOF" >> $GITHUB_OUTPUT
+            git log --oneline -10 >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Restore .github folder from main
+        if: steps.sync.outputs.has_changes == 'true'
+        run: |
+          git checkout ${{ matrix.upstream.local_branch }}
+          rm -rf .github
+          git checkout origin/main -- .github
+          git add .github
+          git commit -m "Restore .github folder from main" || true
+
+      - name: Create Pull Request
+        if: steps.sync.outputs.has_changes == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          commit-message: Sync ${{ matrix.upstream.local_branch }}
+          title: Sync ${{ matrix.upstream.local_branch }}
+          body: |
+            Sync ${{ matrix.upstream.branch }} with ${{ matrix.upstream.name }}/ingress-nginx
+      
+            ## Changelog
+            ```
+            ${{ steps.sync.outputs.changelog }}
+            ```
+          labels: dependencies, automated pr
+          branch: ${{ matrix.upstream.name }}/sync-${{ matrix.upstream.local_branch }}
+          base: ${{ matrix.upstream.local_branch }}
+          delete-branch: true

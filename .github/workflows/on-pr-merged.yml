@@ -1,0 +1,32 @@
+name: On PR Merged
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - 'jancis/branch1'
+      - 'jancis/branch2'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  on-pr-merged:
+    runs-on: ubuntu-latest
+    # Only run if the PR was actually merged (not just closed)
+    if: github.event.pull_request.merged == true
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run on PR merge
+        run: |
+          echo "merge"
+          echo "PR #${{ github.event.pull_request.number }} was merged"
+          echo "Title: ${{ github.event.pull_request.title }}"
+          echo "Merged into: ${{ github.event.pull_request.base.ref }}"
+          echo "From branch: ${{ github.event.pull_request.head.ref }}"
+          echo "Merged by: ${{ github.event.pull_request.merged_by.login }}"
+
