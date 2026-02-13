@@ -70,14 +70,14 @@ jobs:
             echo "EOF" >> $GITHUB_OUTPUT
           fi
 
-      # - name: Remove workflows and push
-      #   if: steps.sync.outputs.has_changes == 'true'
-      #   run: |
-      #     git checkout ${{ matrix.upstream.local_branch }}
-      #     rm -rf .github/workflows
-      #     git add -u .github/workflows
-      #     git commit -m "Delete github workflows" || true
-      #     git push origin ${{ matrix.upstream.local_branch }} --force
+      - name: Restore .github folder from main
+        if: steps.sync.outputs.has_changes == 'true'
+        run: |
+          git checkout ${{ matrix.upstream.local_branch }}
+          rm -rf .github
+          git checkout origin/main -- .github
+          git add .github
+          git commit -m "Restore .github folder from main" || true
 
       - name: Create Pull Request
         if: steps.sync.outputs.has_changes == 'true'
